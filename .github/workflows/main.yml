@@ -1,0 +1,542 @@
+name: Build APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Proje dosyalarini olustur
+        run: |
+          mkdir -p src/main/java/com/ekran/anim
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "EkranAnim"
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2"
+              id("org.jetbrains.kotlin.android") version "1.9.24"
+          }
+          android {
+              namespace = "com.ekran.anim"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.ekran.anim"
+                  minSdk = 26
+                  targetSdk = 33
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          cat > src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <application
+                  android:label="Ekran Animasyon"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".AnimActivity"
+                      android:exported="false"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"
+                      android:excludeFromRecents="true"
+                      android:launchMode="singleTask"
+                      android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"/>
+                  <service android:name=".ScreenService" android:exported="false"/>
+              </application>
+          </manifest>
+          EOF
+          cat > src/main/java/com/ekran/anim/App.kt <<'EOF'
+          package com.ekran.anim
+
+          import android.app.*
+          import android.content.*
+          import android.graphics.*
+          import android.net.Uri
+          import android.os.*
+          import android.provider.Settings
+          import android.view.*
+          import android.widget.*
+          import java.util.*
+          import kotlin.math.*
+
+          val PALETTES = arrayOf(
+              intArrayOf(0xFF00E5FF.toInt(), 0xFF2979FF.toInt(), 0xFFFFFFFF.toInt()),
+              intArrayOf(0xFFFF1744.toInt(), 0xFFFF9100.toInt(), 0xFFFFEA00.toInt()),
+              intArrayOf(0xFF00E676.toInt(), 0xFF76FF03.toInt(), 0xFF69F0AE.toInt()),
+              intArrayOf(0xFFD500F9.toInt(), 0xFF651FFF.toInt(), 0xFFFF4081.toInt()),
+              intArrayOf(0xFFFFFFFF.toInt(), 0xFFB0BEC5.toInt(), 0xFF90A4AE.toInt()),
+              intArrayOf(0xFFFFD740.toInt(), 0xFFFF6E40.toInt(), 0xFFFFFFFF.toInt()),
+              intArrayOf(0xFF18FFFF.toInt(), 0xFFB2FF59.toInt(), 0xFFEA80FC.toInt()),
+              intArrayOf(0xFFFF4081.toInt(), 0xFFFFB6C1.toInt(), 0xFFFFFFFF.toInt()),
+              intArrayOf(0xFF448AFF.toInt(), 0xFF00B0FF.toInt(), 0xFF84FFFF.toInt()),
+              intArrayOf(0xFFFF3D00.toInt(), 0xFFFFAB00.toInt(), 0xFFFF1744.toInt())
+          )
+
+          class AnimView(ctx: Context) : View(ctx) {
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val tp = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val path = Path()
+              private val A = FloatArray(400)
+              private val B = FloatArray(400)
+              private val C = FloatArray(400)
+              private var type = 0
+              private var speed = 1f
+              private var count = 60
+              private var colors = PALETTES[0]
+              private val t0 = System.nanoTime()
+              private var labelUntil = 0L
+
+              var style = 0
+                  set(v) {
+                      field = ((v % 2000) + 2000) % 2000
+                      val r = Random(field.toLong() * 7919L + 13L)
+                      for (i in 0 until 400) { A[i] = r.nextFloat(); B[i] = r.nextFloat(); C[i] = r.nextFloat() }
+                      type = field % 20
+                      colors = PALETTES[(field / 20) % 10]
+                      val vr = (field / 200) % 10
+                      speed = 0.4f + vr * 0.25f
+                      count = 40 + vr * 30
+                      labelUntil = System.currentTimeMillis() + 2500L
+                  }
+
+              init { style = 0 }
+
+              private fun setc(i: Int, a: Int) {
+                  p.color = colors[i % 3]
+                  p.alpha = a.coerceIn(0, 255)
+              }
+
+              override fun onDraw(c: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  val cx = w / 2f
+                  val cy = h / 2f
+                  val t = (System.nanoTime() - t0) / 1e9f * speed
+                  val n = count
+                  val m = max(w, h)
+                  val s = min(w, h)
+                  c.drawColor(Color.BLACK)
+                  p.style = Paint.Style.FILL
+                  when (type) {
+                      0 -> for (i in 0 until n) {
+                          val z = (A[i] + t * 0.15f) % 1f
+                          val ang = B[i] * 6.2832f
+                          val r = z * z * m * 0.8f
+                          setc(i, (z * 255).toInt())
+                          c.drawCircle(cx + cos(ang) * r, cy + sin(ang) * r, 1f + z * 4f, p)
+                      }
+                      1 -> {
+                          tp.textSize = 34f
+                          tp.typeface = Typeface.MONOSPACE
+                          tp.textAlign = Paint.Align.LEFT
+                          for (i in 0 until n / 3) {
+                              val x = A[i] * w
+                              val head = ((B[i] + t * 0.12f * (0.5f + C[i])) % 1f) * (h + 400f)
+                              for (k in 0 until 10) {
+                                  tp.color = colors[0]
+                                  tp.alpha = (255 - k * 25).coerceAtLeast(0)
+                                  val ch = ((i * 7 + k * 3 + (t * 6).toInt()) % 10).toString()
+                                  c.drawText(ch, x, head - k * 38f, tp)
+                              }
+                          }
+                      }
+                      2 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 3f
+                          for (i in 0 until n) {
+                              val f = (B[i] + t * 0.08f * (0.5f + C[i])) % 1f
+                              val x = A[i] * w + sin(t + i) * 25f
+                              val y = h - f * (h + 100f) + 50f
+                              setc(i, 200)
+                              c.drawCircle(x, y, 10f + C[i] * 45f, p)
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      3 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 5f
+                          for (k in 0 until 7) {
+                              val f = (t * 0.25f + k / 7f) % 1f
+                              setc(k, ((1f - f) * 255).toInt())
+                              c.drawCircle(cx, cy, f * m * 0.7f, p)
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      4 -> for (i in 0 until n * 2) {
+                          val q = i.toFloat() / (n * 2)
+                          val a = i * 0.3f + t * 1.5f
+                          val r = q * s * 0.5f * (0.85f + 0.15f * sin(t))
+                          setc(i, 255)
+                          c.drawCircle(cx + cos(a) * r, cy + sin(a) * r, 3f + q * 6f, p)
+                      }
+                      5 -> {
+                          path.reset()
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 5f
+                          setc(0, 255)
+                          for (j in 0..600) {
+                              val u = j / 600f * 6.2832f
+                              val x = cx + sin(3f * u + t) * w * 0.4f
+                              val y = cy + sin(2f * u) * h * 0.25f
+                              if (j == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                          }
+                          c.drawPath(path, p)
+                          p.style = Paint.Style.FILL
+                      }
+                      6 -> for (i in 0 until n) {
+                          val x = A[i] * w + sin(t + i) * 20f
+                          val y = ((B[i] + t * 0.07f * (0.3f + C[i])) % 1f) * h
+                          setc(i, 230)
+                          c.drawCircle(x, y, 2f + C[i] * 5f, p)
+                      }
+                      7 -> for (i in 0 until n) {
+                          val x = A[i] * w + sin(t * 0.7f + i * 1.3f) * 80f
+                          val y = B[i] * h + cos(t * 0.5f + i) * 80f
+                          setc(i, ((sin(t * 2f + i) + 1f) / 2f * 255).toInt())
+                          c.drawCircle(x, y, 4f + C[i] * 6f, p)
+                      }
+                      8 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 4f
+                          for (k in 0 until 5) {
+                              path.reset()
+                              var x = 0f
+                              var first = true
+                              while (x <= w) {
+                                  val y = cy + (k - 2) * h * 0.09f +
+                                      sin(x / w * 6.2832f * (1f + k * 0.4f) + t * (1f + k * 0.3f)) * h * 0.07f
+                                  if (first) { path.moveTo(x, y); first = false } else path.lineTo(x, y)
+                                  x += 8f
+                              }
+                              setc(k, 220)
+                              c.drawPath(path, p)
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      9 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 4f
+                          val sides = 3 + n % 6
+                          for (k in 1..6) {
+                              path.reset()
+                              val r = s * 0.07f * k * (1f + 0.15f * sin(t + k))
+                              val rot = t * 0.6f * (if (k % 2 == 0) 1f else -1f)
+                              for (j in 0..sides) {
+                                  val a = rot + j * 6.2832f / sides
+                                  val x = cx + cos(a) * r
+                                  val y = cy + sin(a) * r
+                                  if (j == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                              }
+                              setc(k, 230)
+                              c.drawPath(path, p)
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      10 -> {
+                          val cols = 12
+                          val gap = w / cols
+                          var yy = gap / 2f
+                          var row = 0
+                          while (yy < h) {
+                              for (q in 0 until cols) {
+                                  val x = gap * q + gap / 2f
+                                  val d = hypot(x - cx, yy - cy)
+                                  val r = 3f + (sin(d * 0.02f - t * 3f) + 1f) * gap * 0.2f
+                                  setc(q + row, 255)
+                                  c.drawCircle(x, yy, r, p)
+                              }
+                              yy += gap
+                              row++
+                          }
+                      }
+                      11 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 2f
+                          for (k in 1..4) { setc(0, 70); c.drawCircle(cx, cy, s * 0.12f * k, p) }
+                          p.strokeWidth = 4f
+                          for (k in 0 until 45) {
+                              val a = t * 2f - k * 0.035f
+                              setc(0, 255 - k * 5)
+                              c.drawLine(cx, cy, cx + cos(a) * s * 0.48f, cy + sin(a) * s * 0.48f, p)
+                          }
+                          p.style = Paint.Style.FILL
+                          for (i in 0 until 8) {
+                              val a = A[i] * 6.2832f
+                              val r = (0.1f + B[i] * 0.38f) * s
+                              val diff = ((t * 2f - a) % 6.2832f + 6.2832f) % 6.2832f
+                              setc(1, (255 - diff * 40f).toInt())
+                              c.drawCircle(cx + cos(a) * r, cy + sin(a) * r, 8f, p)
+                          }
+                      }
+                      12 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 3f
+                          for (i in 0 until n) {
+                              val x = A[i] * w
+                              val y = ((B[i] + t * 0.7f * (0.5f + C[i])) % 1f) * (h + 200f) - 100f
+                              val len = 40f + C[i] * 60f
+                              setc(i, 200)
+                              c.drawLine(x, y, x - len * 0.2f, y - len, p)
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      13 -> {
+                          setc(2, 255)
+                          c.drawCircle(cx, cy, s * 0.05f, p)
+                          val np = min(8, 3 + n / 50)
+                          for (i in 0 until np) {
+                              val r = s * 0.055f * (i + 1)
+                              p.style = Paint.Style.STROKE
+                              p.strokeWidth = 2f
+                              setc(i, 50)
+                              c.drawCircle(cx, cy, r, p)
+                              p.style = Paint.Style.FILL
+                              val a = t * (1.6f / (1f + i * 0.35f)) + A[i] * 6.2832f
+                              setc(i, 255)
+                              c.drawCircle(cx + cos(a) * r, cy + sin(a) * r, 6f + C[i] * 10f, p)
+                          }
+                      }
+                      14 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 8f
+                          var x = 0f
+                          var q = 0
+                          while (x <= w) {
+                              val y1 = h * 0.35f + sin(x * 0.008f + t) * h * 0.1f + sin(x * 0.021f - t * 1.3f) * h * 0.05f
+                              setc(q / 20, 90)
+                              c.drawLine(x, y1, x, y1 + h * 0.25f + sin(x * 0.013f + t * 0.7f) * h * 0.08f, p)
+                              x += 7f
+                              q++
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      15 -> {
+                          val br = 0.6f + 0.4f * sin(t * 1.5f)
+                          for (k in 5 downTo 1) {
+                              setc(k, 40 + (6 - k) * 30)
+                              c.drawCircle(cx, cy, s * 0.08f * k * br, p)
+                          }
+                      }
+                      16 -> {
+                          val cal = Calendar.getInstance()
+                          val sec = cal.get(Calendar.SECOND)
+                          val txt = String.format(
+                              "%02d%s%02d",
+                              cal.get(Calendar.HOUR_OF_DAY),
+                              if (sec % 2 == 0) ":" else " ",
+                              cal.get(Calendar.MINUTE)
+                          )
+                          tp.typeface = Typeface.DEFAULT_BOLD
+                          tp.textAlign = Paint.Align.CENTER
+                          tp.textSize = w * 0.25f
+                          tp.color = colors[0]
+                          tp.alpha = 255
+                          tp.setShadowLayer(30f, 0f, 0f, colors[1])
+                          c.drawText(txt, cx, cy + sin(t * 0.3f) * h * 0.1f, tp)
+                          tp.clearShadowLayer()
+                      }
+                      17 -> {
+                          p.style = Paint.Style.STROKE
+                          p.strokeWidth = 4f
+                          for (k in 0 until 14) {
+                              val f = (t * 0.18f + k / 14f) % 1f
+                              val sz = f * f * m * 1.3f
+                              c.save()
+                              c.rotate(f * 120f * (if (k % 2 == 0) 1f else -1f) + t * 5f, cx, cy)
+                              setc(k, (f * 255).toInt())
+                              c.drawRect(cx - sz / 2f, cy - sz / 2f, cx + sz / 2f, cy + sz / 2f, p)
+                              c.restore()
+                          }
+                          p.style = Paint.Style.FILL
+                      }
+                      18 -> for (i in 0 until n) {
+                          val x = A[i] * w + sin(t + i) * 30f
+                          val y = ((B[i] + t * 0.1f * (0.4f + C[i])) % 1f) * (h + 60f) - 30f
+                          c.save()
+                          c.rotate(t * 90f * (C[i] - 0.5f) * 4f + i * 30f, x, y)
+                          setc(i, 255)
+                          c.drawRect(x - 8f, y - 4f, x + 8f, y + 4f, p)
+                          c.restore()
+                      }
+                      else -> {
+                          var y = 0f
+                          p.strokeWidth = 2f
+                          while (y <= h) {
+                              val o = sin(y * 0.012f + t * 2f) * w * 0.25f
+                              setc(2, 90)
+                              c.drawLine(cx + o, y, cx - o, y, p)
+                              setc(0, 255)
+                              c.drawCircle(cx + o, y, 7f, p)
+                              setc(1, 255)
+                              c.drawCircle(cx - o, y, 7f, p)
+                              y += 24f
+                          }
+                      }
+                  }
+                  if (System.currentTimeMillis() < labelUntil) {
+                      tp.typeface = Typeface.DEFAULT
+                      tp.textAlign = Paint.Align.CENTER
+                      tp.textSize = 38f
+                      tp.color = Color.WHITE
+                      tp.alpha = 160
+                      c.drawText("Stil " + (style + 1) + " / 2000", cx, h - 80f, tp)
+                  }
+                  postInvalidateOnAnimation()
+              }
+          }
+
+          class AnimActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  if (Build.VERSION.SDK_INT >= 27) {
+                      setShowWhenLocked(true)
+                      setTurnScreenOn(true)
+                  }
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  val lp = window.attributes
+                  lp.screenBrightness = 0.04f
+                  window.attributes = lp
+                  val prefs = getSharedPreferences("a", 0)
+                  val v = AnimView(this)
+                  v.style = if (intent.getBooleanExtra("random", false)) Random().nextInt(2000) else prefs.getInt("s", 0)
+                  var downX = 0f
+                  var downT = 0L
+                  v.setOnTouchListener { _, e ->
+                      if (e.action == MotionEvent.ACTION_DOWN) {
+                          downX = e.x
+                          downT = System.currentTimeMillis()
+                      } else if (e.action == MotionEvent.ACTION_UP) {
+                          if (System.currentTimeMillis() - downT > 700L) {
+                              finish()
+                          } else {
+                              v.style = if (downX < v.width / 2f) v.style - 1 else v.style + 1
+                              prefs.edit().putInt("s", v.style).apply()
+                          }
+                      }
+                      true
+                  }
+                  setContentView(v)
+                  window.decorView.systemUiVisibility =
+                      View.SYSTEM_UI_FLAG_FULLSCREEN or
+                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+              }
+          }
+
+          class ScreenService : Service() {
+              private val rcv = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) {
+                      if (i.action == Intent.ACTION_SCREEN_OFF) {
+                          Handler(Looper.getMainLooper()).postDelayed({
+                              val it = Intent(c, AnimActivity::class.java)
+                              it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                              it.putExtra("random", true)
+                              c.startActivity(it)
+                          }, 400L)
+                      }
+                  }
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("ekran", "Ekran", NotificationManager.IMPORTANCE_MIN))
+                  val n = Notification.Builder(this, "ekran")
+                      .setContentTitle("Ekran animasyonu acik")
+                      .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+                      .build()
+                  startForeground(1, n)
+                  registerReceiver(rcv, IntentFilter(Intent.ACTION_SCREEN_OFF))
+              }
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int = START_STICKY
+
+              override fun onDestroy() {
+                  unregisterReceiver(rcv)
+                  super.onDestroy()
+              }
+
+              override fun onBind(i: Intent?): IBinder? = null
+          }
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val ll = LinearLayout(this)
+                  ll.orientation = LinearLayout.VERTICAL
+                  ll.setPadding(40, 90, 40, 40)
+                  val tv = TextView(this)
+                  tv.text = "Ekran Animasyon\n\nSirayla 1, 2, 3 ile ayarla. Ekran kapaninca 2000 stilden biri otomatik acilir.\n\nAnimasyonda: sag/sol dokun = sonraki/onceki stil, basili tut ve birak = kapat."
+                  tv.textSize = 16f
+                  ll.addView(tv)
+                  fun btn(label: String, f: () -> Unit) {
+                      val bt = Button(this)
+                      bt.text = label
+                      bt.setOnClickListener { f() }
+                      ll.addView(bt)
+                  }
+                  btn("1) Ustte gosterme izni ver") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName)))
+                  }
+                  btn("2) Bildirim izni ver") {
+                      if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+                  }
+                  btn("3) Servisi baslat") {
+                      startForegroundService(Intent(this, ScreenService::class.java))
+                      Toast.makeText(this, "Servis basladi", Toast.LENGTH_SHORT).show()
+                  }
+                  btn("4) Servisi durdur") {
+                      stopService(Intent(this, ScreenService::class.java))
+                      Toast.makeText(this, "Servis durdu", Toast.LENGTH_SHORT).show()
+                  }
+                  btn("5) Onizle (rastgele stil)") {
+                      val it = Intent(this, AnimActivity::class.java)
+                      it.putExtra("random", true)
+                      startActivity(it)
+                  }
+                  val sv = ScrollView(this)
+                  sv.addView(ll)
+                  setContentView(sv)
+              }
+          }
+          EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: APK derle
+        run: gradle assembleDebug --no-daemon -Dorg.gradle.jvmargs=-Xmx3g
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EkranAnim-APK
+          path: build/outputs/apk/debug/*.apk
